@@ -388,6 +388,7 @@ td::Ref<Continuation> RepeatCont::jump(VmState* st, int& exitcode) const& {
   if (count <= 0) {
     return after;
   }
+  st->trigger_distinguisher(true);
   if (body->has_c0()) {
     return body;
   }
@@ -401,6 +402,7 @@ td::Ref<Continuation> RepeatCont::jump_w(VmState* st, int& exitcode) & {
     body.clear();
     return std::move(after);
   }
+  st->trigger_distinguisher(true);
   if (body->has_c0()) {
     after.clear();
     return std::move(body);
@@ -492,6 +494,7 @@ td::Ref<Continuation> UntilCont::jump(VmState* st, int& exitcode) const& {
     VM_LOG(st) << "until loop terminated\n";
     return after;
   }
+  st->trigger_distinguisher(true);
   if (!body->has_c0()) {
     st->set_c0(Ref<UntilCont>{this});
   }
@@ -505,6 +508,7 @@ td::Ref<Continuation> UntilCont::jump_w(VmState* st, int& exitcode) & {
     body.clear();
     return std::move(after);
   }
+  st->trigger_distinguisher(true);
   if (!body->has_c0()) {
     st->set_c0(Ref<UntilCont>{this});
     return body;
@@ -539,6 +543,7 @@ int VmState::until(Ref<Continuation> body, Ref<Continuation> after) {
   if (!body->has_c0()) {
     set_c0(Ref<UntilCont>{true, body, std::move(after)});
   }
+  trigger_distinguisher(true);
   return jump(std::move(body));
 }
 
@@ -549,6 +554,7 @@ td::Ref<Continuation> WhileCont::jump(VmState* st, int& exitcode) const& {
       VM_LOG(st) << "while loop terminated\n";
       return after;
     }
+    st->trigger_distinguisher(true);
     if (!body->has_c0()) {
       st->set_c0(Ref<WhileCont>{true, cond, body, after, false});
     }
@@ -571,6 +577,7 @@ td::Ref<Continuation> WhileCont::jump_w(VmState* st, int& exitcode) & {
       body.clear();
       return std::move(after);
     }
+    st->trigger_distinguisher(true);
     if (!body->has_c0()) {
       chkcond = false;  // re-use current object since we hold the unique pointer to it
       st->set_c0(Ref<WhileCont>{this});

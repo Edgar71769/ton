@@ -24,6 +24,7 @@
 #include "vm/cellslice.h"
 #include "vm/dict.h"
 #include "vm/boc.h"
+#include "vm/vm.h"
 #include <ostream>
 #include "tl/tlblib.hpp"
 #include "td/utils/bits.h"
@@ -392,6 +393,22 @@ struct Transaction {
   td::optional<AccountStorageStat> new_account_storage_stat;
   td::optional<td::Bits256> new_storage_dict_hash;
   bool gas_limit_overridden{false};
+
+  vm::VmState sbs_vm_;
+
+  class Logger : public td::LogInterface {
+   public:
+    void append(td::CSlice slice) override {
+      res.append(slice.data(), slice.size());
+    }
+    void clear() {
+      res.clear();
+    }
+    std::string res;
+  };
+
+  Logger sbs_logger_;
+
   Transaction(const Account& _account, int ttype, ton::LogicalTime req_start_lt, ton::UnixTime _now,
               Ref<vm::Cell> _inmsg = {});
   bool unpack_input_msg(bool ihr_delivered, const ActionPhaseConfig* cfg);
@@ -403,7 +420,8 @@ struct Transaction {
   Ref<vm::Stack> prepare_vm_stack(ComputePhase& cp);
   std::vector<Ref<vm::Cell>> compute_vm_libraries(const ComputePhaseConfig& cfg);
   bool run_precompiled_contract(const ComputePhaseConfig& cfg, precompiled::PrecompiledSmartContract& precompiled);
-  bool prepare_compute_phase(const ComputePhaseConfig& cfg);
+  bool prepare_compute_phase(const ComputePhaseConfig& cfg, bool sbs = false);
+  bool continue_compute_phase_sbs(const ComputePhaseConfig& cfg);
   bool prepare_action_phase(const ActionPhaseConfig& cfg);
   td::Status check_state_limits(const SizeLimitsConfig& size_limits, bool update_storage_stat = true);
   bool prepare_bounce_phase(const ActionPhaseConfig& cfg);

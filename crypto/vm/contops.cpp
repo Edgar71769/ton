@@ -328,8 +328,10 @@ int exec_if(VmState* st) {
   stack.check_underflow(2);
   auto cont = stack.pop_cont();
   if (stack.pop_bool()) {
+    st->trigger_distinguisher(true);
     return st->call(std::move(cont));
   }
+  st->trigger_distinguisher(false);
   return 0;
 }
 
@@ -339,8 +341,10 @@ int exec_ifnot(VmState* st) {
   stack.check_underflow(2);
   auto cont = stack.pop_cont();
   if (!stack.pop_bool()) {
+    st->trigger_distinguisher(false);
     return st->call(std::move(cont));
   }
+  st->trigger_distinguisher(true);
   return 0;
 }
 
@@ -350,8 +354,10 @@ int exec_if_jmp(VmState* st) {
   stack.check_underflow(2);
   auto cont = stack.pop_cont();
   if (stack.pop_bool()) {
+    st->trigger_distinguisher(true);
     return st->jump(std::move(cont));
   }
+  st->trigger_distinguisher(false);
   return 0;
 }
 
@@ -361,8 +367,10 @@ int exec_ifnot_jmp(VmState* st) {
   stack.check_underflow(2);
   auto cont = stack.pop_cont();
   if (!stack.pop_bool()) {
+    st->trigger_distinguisher(false);
     return st->jump(std::move(cont));
   }
+  st->trigger_distinguisher(true);
   return 0;
 }
 
@@ -389,7 +397,10 @@ int exec_if_else(VmState* st) {
   auto cont0 = stack.pop_cont();
   auto cont1 = stack.pop_cont();
   if (stack.pop_bool()) {
+    st->trigger_distinguisher(true);
     std::swap(cont0, cont1);
+  } else {
+    st->trigger_distinguisher(false);
   }
   cont1.clear();
   return st->call(std::move(cont0));
@@ -445,8 +456,10 @@ int exec_if_bit_jmp(VmState* st, unsigned args) {
   bool val = x->get_bit(bit);
   stack.push_int(std::move(x));
   if (val ^ negate) {
+    st->trigger_distinguisher(!negate);
     return st->jump(std::move(cont));
   }
+  st->trigger_distinguisher(negate);
   return 0;
 }
 
@@ -470,8 +483,10 @@ int exec_if_bit_jmpref(VmState* st, CellSlice& cs, unsigned args, int pfx_bits) 
   bool val = x->get_bit(bit);
   stack.push_int(std::move(x));
   if (val ^ negate) {
+    st->trigger_distinguisher(!negate);
     return st->jump(st->ref_to_cont(std::move(cell)));
   }
+  st->trigger_distinguisher(negate);
   return 0;
 }
 

@@ -1671,7 +1671,7 @@ bool Transaction::run_precompiled_contract(const ComputePhaseConfig& cfg, precom
  *
  * @returns True if the compute phase was successfully prepared and executed, false otherwise.
  */
-bool Transaction::prepare_compute_phase(const ComputePhaseConfig& cfg) {
+bool Transaction::prepare_compute_phase(const ComputePhaseConfig& cfg, bool sbs) {
   // TODO: add more skip verifications + sometimes use state from in_msg to re-activate
   // ...
   compute_phase = std::make_unique<ComputePhase>();
@@ -1798,6 +1798,10 @@ bool Transaction::prepare_compute_phase(const ComputePhaseConfig& cfg) {
   // auto log = create_vm_log(error_stream ? &ostream_logger : nullptr);
   LOG(DEBUG) << "creating VM";
 
+  if (sbs) {
+    sbs_logger_.clear();
+  }
+
   std::unique_ptr<StringLoggerTail> logger;
   auto vm_log = vm::VmLog();
   if (cfg.with_vm_log) {
@@ -1807,8 +1811,12 @@ bool Transaction::prepare_compute_phase(const ComputePhaseConfig& cfg) {
     } else if (cfg.vm_log_verbosity > 0) {
       log_max_size = 1 << 20;
     }
-    logger = std::make_unique<StringLoggerTail>(log_max_size);
-    vm_log.log_interface = logger.get();
+    if (sbs) {
+      vm_log.log_interface = &sbs_logger_;
+    } else {
+      logger = std::make_unique<StringLoggerTail>(log_max_size);
+      vm_log.log_interface = logger.get();
+    }
     vm_log.log_options = td::LogOptions(VERBOSITY_NAME(DEBUG), true, false);
     if (cfg.vm_log_verbosity > 1) {
       vm_log.log_mask |= vm::VmLog::ExecLocation;
@@ -1824,15 +1832,33 @@ bool Transaction::prepare_compute_phase(const ComputePhaseConfig& cfg) {
       }
     }
   }
-  vm::VmState vm{new_code, cfg.global_version, std::move(stack), gas, 1, new_data, vm_log, compute_vm_libraries(cfg)};
-  vm.set_max_data_depth(cfg.max_vm_data_depth);
-  vm.set_c7(prepare_vm_c7(cfg));  // tuple with SmartContractInfo
-  vm.set_chksig_always_succeed(cfg.ignore_chksig);
-  vm.set_stop_on_accept_message(cfg.stop_on_accept_message);
+  vm::VmState vm;
+  if (sbs) {
+    sbs_vm_ = vm::VmState{new_code, cfg.global_version, std::move(stack), gas, 1, new_data, vm_log, compute_vm_libraries(cfg)};
+  } else {
+    vm = vm::VmState{new_code, cfg.global_version, std::move(stack), gas, 1, new_data, vm_log, compute_vm_libraries(cfg)};
+  }
+  vm::VmState& vm_ref = sbs ? sbs_vm_ : vm;
+  vm_ref.set_max_data_depth(cfg.max_vm_data_depth);
+  vm_ref.set_c7(prepare_vm_c7(cfg));  // tuple with SmartContractInfo
+  vm_ref.set_chksig_always_succeed(cfg.ignore_chksig);
+  vm_ref.set_stop_on_accept_message(cfg.stop_on_accept_message);
   // vm.incr_stack_trace(1);    // enable stack dump after each step
 
+  if (sbs) {
+    if (sbs_vm_.sbs_init() != 0) {
+      LOG(ERROR) << "Failed to initialize SBS VM";
+      return false;
+    }
+  }
+
   LOG(DEBUG) << "starting VM";
-  cp.vm_init_state_hash = vm.get_state_hash();
+  cp.vm_init_state_hash = vm_ref.get_state_hash();
+
+  if (sbs) {
+    return true;
+  }
+
   td::Timer timer;
   cp.exit_code = ~vm.run();
   double elapsed = timer.elapsed();
@@ -1877,6 +1903,72 @@ bool Transaction::prepare_compute_phase(const ComputePhaseConfig& cfg) {
         sb << "output actions: ";
         block::gen::OutList{out_act_num}.print_ref(sb, cp.actions);
       };
+    }
+  }
+  cp.mode = 0;
+  cp.exit_arg = 0;
+  if (!cp.success && stack->depth() > 0) {
+    td::RefInt256 tos = stack->tos().as_int();
+    if (tos.not_null() && tos->signed_fits_bits(32)) {
+      cp.exit_arg = (int)tos->to_long();
+    }
+  }
+  if (cp.accepted) {
+    if (account.is_special) {
+      cp.gas_fees = td::zero_refint();
+    } else {
+      cp.gas_fees = cfg.compute_gas_price(cp.gas_used);
+      total_fees += cp.gas_fees;
+      balance -= cp.gas_fees;
+    }
+    LOG(DEBUG) << "gas fees: " << cp.gas_fees->to_dec_string() << " = " << cfg.gas_price256->to_dec_string() << " * "
+               << cp.gas_used << " /2^16 ; price=" << cfg.gas_price << "; flat rate=[" << cfg.flat_gas_price << " for "
+               << cfg.flat_gas_limit << "]; remaining balance=" << balance.to_str();
+    CHECK(td::sgn(balance.grams) >= 0);
+  }
+  return true;
+}
+
+bool Transaction::continue_compute_phase_sbs(const ComputePhaseConfig& cfg) {
+  td::optional<int> rescode = sbs_vm_.sbs_step();
+
+  if (!rescode) {
+    return false;
+  }
+
+  ComputePhase& cp = *(compute_phase.get());
+
+  cp.exit_code = ~(*rescode);
+
+  LOG(DEBUG) << "VM terminated with exit code " << cp.exit_code;
+  cp.out_of_gas = (cp.exit_code == ~(int)vm::Excno::out_of_gas);
+  cp.vm_final_state_hash = sbs_vm_.get_final_state_hash(cp.exit_code);
+  Ref<vm::Stack> stack = sbs_vm_.get_stack_ref();
+  cp.vm_steps = (int) sbs_vm_.get_steps_count();
+  vm::GasLimits gas = sbs_vm_.get_gas_limits();
+  cp.gas_used = std::min<long long>(gas.gas_consumed(), gas.gas_limit);
+  cp.accepted = (gas.gas_credit == 0);
+  cp.success = (cp.accepted && sbs_vm_.committed());
+  if (cp.accepted & use_msg_state) {
+    was_activated = true;
+    acc_status = Account::acc_active;
+  }
+  LOG(INFO) << "steps: " << sbs_vm_.get_steps_count() << " gas: used=" << gas.gas_consumed() << ", max=" << gas.gas_max
+            << ", limit=" << gas.gas_limit << ", credit=" << gas.gas_credit;
+  LOG(INFO) << "out_of_gas=" << cp.out_of_gas << ", accepted=" << cp.accepted << ", success=" << cp.success;
+  // if (logger != nullptr) { // TODO
+  //   cp.vm_log = logger->get_log();
+  // }
+  if (cp.success) {
+    cp.new_data = sbs_vm_.get_committed_state().c4;  // c4 -> persistent data
+    cp.actions = sbs_vm_.get_committed_state().c5;   // c5 -> action list
+    int out_act_num = output_actions_count(cp.actions);
+    if (verbosity > 2) {
+      std::cerr << "new smart contract data: ";
+      bool can_be_special = true;
+      load_cell_slice_special(cp.new_data, can_be_special).print_rec(std::cerr);
+      std::cerr << "output actions: ";
+      block::gen::OutList{out_act_num}.print_ref(std::cerr, cp.actions);
     }
   }
   cp.mode = 0;

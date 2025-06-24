@@ -106,6 +106,17 @@ class VmState final : public VmStateInterface {
   size_t get_extra_balance_counter = 0;
   long long free_gas_consumed = 0;
   std::unique_ptr<ParentVmState> parent = nullptr;
+  bool sbs_restore_parent{false};
+  int sbs_res{0};
+  bool sbs_running{false};
+
+  int cont_distinguisher = -1;
+  int cont_distinguisher_true = -1;
+  int cont_distinguisher_false = -1;
+  bool cont_distinguisher_triggered = false;
+
+  int primed_try_param = -1;
+  int triggered_try_param = -1;
 
  public:
   enum {
@@ -252,6 +263,39 @@ class VmState final : public VmStateInterface {
   td::BitArray<256> get_final_state_hash(int exit_code) const;
   int step();
   int run();
+  int sbs_init();
+  td::optional<int> sbs_step();
+  int sbs_exit_code();
+  int get_cont_distinguisher() {
+    return cont_distinguisher;
+  }
+  void set_cont_distinguishers(int distinguisher, int distinguisher_true, int distinguisher_false) {
+    cont_distinguisher = distinguisher;
+    cont_distinguisher_true = distinguisher_true;
+    cont_distinguisher_false = distinguisher_false;
+    cont_distinguisher_triggered = false;
+  }
+  void trigger_distinguisher(bool true_branch) {
+    if (true_branch && cont_distinguisher_true >= 0) {
+      cont_distinguisher = cont_distinguisher_true;
+      cont_distinguisher_triggered = true;
+    } else if (!true_branch && cont_distinguisher_false >= 0) {
+      cont_distinguisher = cont_distinguisher_false;
+      cont_distinguisher_triggered = true;
+    }
+    cont_distinguisher_true = -1;
+    cont_distinguisher_false = -1;
+  }
+  bool get_cont_distinguisher_triggered() {
+    return cont_distinguisher_triggered;
+  }
+  void set_try_params(int primed, int triggered) {
+    primed_try_param = primed;
+    triggered_try_param = triggered;
+  }
+  int get_triggered_try_param() {
+    return triggered_try_param;
+  }
   Stack& get_stack() {
     return stack.write();
   }
@@ -442,6 +486,7 @@ class VmState final : public VmStateInterface {
  private:
   void init_cregs(bool same_c3 = false, bool push_0 = true);
   int run_inner();
+  td::optional<int> sbs_step_inner();
 };
 
 struct ParentVmState {
