@@ -835,7 +835,7 @@ bool Op::generate_code_step(Stack& stack) {
       stack.o << "c4 PUSH";
       stack.o << "c5 PUSH";
       stack.o << "c7 PUSH";
-      stack.o << "<{";
+      stack.o << "CONT:<{";
       stack.o.indent();
       if (block1->noreturn()) {
         catch_stack.mode |= Stack::_NeedRetAlt;
@@ -844,7 +844,7 @@ bool Op::generate_code_step(Stack& stack) {
       catch_stack.drop_vars_except(next->var_info);
       catch_stack.opt_show();
       stack.o.undent();
-      stack.o << "}>CONT";
+      stack.o << "}>";
       stack.o << "c7 SETCONT";
       stack.o << "c5 SETCONT";
       stack.o << "c4 SETCONT";
@@ -858,7 +858,7 @@ bool Op::generate_code_step(Stack& stack) {
       }
       stack.s.erase(stack.s.end() - catch_vars.size(), stack.s.end());
       stack.modified();
-      stack.o << "<{";
+      stack.o << "CONT:<{";
       stack.o.indent();
       if (block0->noreturn()) {
         stack.mode |= Stack::_NeedRetAlt;
@@ -871,11 +871,26 @@ bool Op::generate_code_step(Stack& stack) {
       }
       stack.opt_show();
       stack.o.undent();
-      stack.o << "}>CONT";
+      stack.o << "}>";
       stack.o << "c1 PUSH";
       stack.o << "COMPOSALT";
       stack.o << "SWAP";
       stack.o << "TRY";
+      return true;
+    }
+    case _DebugInfo: {
+      if (with_debug_info) {
+        std::ostringstream ops;
+        ops << simple_int_const << " DEBUGMARK";
+        stack.o << ops.str();
+        if (debug_infos[simple_int_const].want_vars) {
+          for (auto i : stack.s) {
+            std::ostringstream varstrs;
+            stack.o.show_var(varstrs, i.first);
+            debug_infos[simple_int_const].vars.push_back(varstrs.str());
+          }
+        }
+      }
       return true;
     }
     default:

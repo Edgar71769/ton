@@ -41,6 +41,7 @@ td::Result<std::string> compile_internal(char *config_json) {
 
   TRY_RESULT(opt_level, td::get_json_object_int_field(config, "optLevel", false));
   TRY_RESULT(sources_obj, td::get_json_object_field(config, "sources", td::JsonValue::Type::Array, false));
+  TRY_RESULT(enable_debug_info, td::get_json_object_bool_field(config, "debugInfo", true, false));
 
   auto &sources_arr = sources_obj.get_array();
 
@@ -55,14 +56,15 @@ td::Result<std::string> compile_internal(char *config_json) {
   funC::asm_preamble = true;
   funC::verbosity = 0;
   funC::indent = 1;
+  funC::with_debug_info = enable_debug_info;
 
-  std::ostringstream outs, errs;
-  int funC_res = funC::func_proceed(sources, outs, errs);
+  std::ostringstream outs, errs, debug_out;
+  int funC_res = funC::func_proceed(sources, outs, errs, debug_out);
   if (funC_res != 0) {
     return td::Status::Error("FunC compilation error: " + errs.str());
   }
 
-  TRY_RESULT(fift_res, fift::compile_asm_program(outs.str(), "/fiftlib/"));
+  TRY_RESULT(fift_res, fift::compile_asm_program(outs.str(), "/fiftlib/", enable_debug_info));
 
   td::JsonBuilder result_json;
   auto obj = result_json.enter_object();
@@ -70,6 +72,10 @@ td::Result<std::string> compile_internal(char *config_json) {
   obj("fiftCode", std::move(fift_res.fiftCode));
   obj("codeBoc", std::move(fift_res.codeBoc64));
   obj("codeHashHex", std::move(fift_res.codeHashHex));
+  if (funC::with_debug_info) {
+    obj("debugInfo", td::JsonRaw(debug_out.str()));
+    obj("debugMarksBoc", std::move(fift_res.debugMarksBoc64));
+  }
   obj.leave();
 
   return result_json.string_builder().as_cslice().str();

@@ -978,6 +978,31 @@ void combine_parallel(val& x, const val y) {
 }
 }  // namespace blk_fl
 
+int allocate_context_id() {
+  return ++debug_info_context_id;
+}
+
+DebugInfo& insert_debug_info(Lexer& lex, CodeBlob& code) {
+  int idx = (int) debug_infos.size();
+  auto& op = code.emplace_back(lex.cur().loc, Op::_DebugInfo);
+  op.simple_int_const = idx;
+  std::ostringstream locstrs;
+  locstrs << lex.cur().loc.fdescr;
+  DebugInfo info;
+  info.loc_file = locstrs.str();
+  if (lex.cur().loc.fdescr != nullptr) {
+    long line, pos;
+    lex.cur().loc.convert_pos(&line, &pos);
+    info.loc_line = line;
+    info.loc_pos = pos;
+  }
+  info.func_name = code.name;
+  info.require_context_id = debug_info_context_id;
+  info.context_id = allocate_context_id();
+  debug_infos.push_back(info);
+  return debug_infos[idx];
+}
+
 blk_fl::val parse_return_stmt(Lexer& lex, CodeBlob& code) {
   auto expr = parse_expr(lex, code);
   expr->chk_rvalue(lex.cur());
@@ -991,6 +1016,8 @@ blk_fl::val parse_return_stmt(Lexer& lex, CodeBlob& code) {
     lex.cur().error(os.str());
   }
   std::vector<var_idx_t> tmp_vars = expr->pre_compile(code);
+  DebugInfo& di = insert_debug_info(lex, code);
+  di.ret = true;
   code.emplace_back(lex.cur().loc, Op::_Return, std::move(tmp_vars));
   lex.expect(';');
   return blk_fl::ret;
@@ -1007,25 +1034,33 @@ blk_fl::val parse_implicit_ret_stmt(Lexer& lex, CodeBlob& code) {
        << " cannot be unified with implicit end-of-block return type " << ret_type << ": " << ue;
     lex.cur().error(os.str());
   }
+  DebugInfo& di = insert_debug_info(lex, code);
+  di.ret = true;
   code.emplace_back(lex.cur().loc, Op::_Return);
   return blk_fl::ret;
 }
 
 blk_fl::val parse_stmt(Lexer& lex, CodeBlob& code);
 
-blk_fl::val parse_block_stmt(Lexer& lex, CodeBlob& code, bool no_new_scope = false) {
+blk_fl::val parse_block_stmt(Lexer& lex, CodeBlob& code, bool no_new_scope = false, DebugInfo** begin_di = nullptr, DebugInfo** end_di = nullptr) {
   lex.expect('{');
   if (!no_new_scope) {
     sym::open_scope(lex);
   }
   blk_fl::val res = blk_fl::init;
   bool warned = false;
+  if (begin_di != nullptr) {
+    *begin_di = &insert_debug_info(lex, code);
+  }
   while (lex.tp() != '}') {
     if (!(res & blk_fl::end) && !warned) {
       lex.cur().loc.show_warning("unreachable code");
       warned = true;
     }
     blk_fl::combine(res, parse_stmt(lex, code));
+  }
+  if (end_di != nullptr) {
+    *end_di = &insert_debug_info(lex, code);
   }
   if (!no_new_scope) {
     sym::close_scope(lex);
@@ -1051,10 +1086,21 @@ blk_fl::val parse_repeat_stmt(Lexer& lex, CodeBlob& code) {
   if (tmp_vars.size() != 1) {
     lex.cur().error("repeat count value is not a singleton");
   }
+
+  DebugInfo& di = insert_debug_info(lex, code);
+  di.branch_true_context_id = allocate_context_id();
+
   Op& repeat_op = code.emplace_back(loc, Op::_Repeat, tmp_vars);
   code.push_set_cur(repeat_op.block0);
-  blk_fl::val res = parse_block_stmt(lex, code);
+  DebugInfo* block_di_end = nullptr;
+  blk_fl::val res = parse_block_stmt(lex, code, false, nullptr, &block_di_end);
+  block_di_end->context_id = di.context_id;
+  block_di_end->branch_true_context_id = di.branch_true_context_id;
   code.close_pop_cur(lex.cur().loc);
+
+  DebugInfo& di_end = insert_debug_info(lex, code);
+  di_end.require_context_id = di.context_id;
+
   return res | blk_fl::end;
 }
 
@@ -1071,25 +1117,47 @@ blk_fl::val parse_while_stmt(Lexer& lex, CodeBlob& code) {
     os << "while condition value of type " << expr->e_type << " is not an integer: " << ue;
     lex.cur().error(os.str());
   }
+
+  DebugInfo& di = insert_debug_info(lex, code);
+
   Op& while_op = code.emplace_back(loc, Op::_While);
+
   code.push_set_cur(while_op.block0);
+
   while_op.left = expr->pre_compile(code);
+  DebugInfo& di_cond = insert_debug_info(lex, code);
+  di_cond.branch_true_context_id = allocate_context_id();
+
   code.close_pop_cur(lex.cur().loc);
+
   if (while_op.left.size() != 1) {
     lex.cur().error("while condition value is not a singleton");
   }
   code.push_set_cur(while_op.block1);
-  blk_fl::val res1 = parse_block_stmt(lex, code);
+  DebugInfo* block_di_end = nullptr;
+  blk_fl::val res1 = parse_block_stmt(lex, code, false, nullptr, &block_di_end);
+  block_di_end->context_id = di_cond.require_context_id;
   code.close_pop_cur(lex.cur().loc);
+
+  DebugInfo& di_end = insert_debug_info(lex, code);
+  di_end.require_context_id = di_cond.context_id;
+
   return res1 | blk_fl::end;
 }
 
 blk_fl::val parse_do_stmt(Lexer& lex, CodeBlob& code) {
+  DebugInfo& di = insert_debug_info(lex, code);
+  int end_context_id = allocate_context_id();
+
   Op& while_op = code.emplace_back(lex.cur().loc, Op::_Until);
   lex.expect(_Do);
   code.push_set_cur(while_op.block0);
   sym::open_scope(lex);
-  blk_fl::val res = parse_block_stmt(lex, code, true);
+
+  DebugInfo* block_di = nullptr;
+  blk_fl::val res = parse_block_stmt(lex, code, true, &block_di);
+  block_di->require_context_id = di.context_id;
+
   lex.expect(_Until);
   auto expr = parse_expr(lex, code);
   expr->chk_rvalue(lex.cur());
@@ -1103,19 +1171,42 @@ blk_fl::val parse_do_stmt(Lexer& lex, CodeBlob& code) {
     lex.cur().error(os.str());
   }
   while_op.left = expr->pre_compile(code);
+
+  DebugInfo& di_cond = insert_debug_info(lex, code);
+  di_cond.branch_true_context_id = block_di->require_context_id;
+  di_cond.context_id = end_context_id;
+
   code.close_pop_cur(lex.cur().loc);
   if (while_op.left.size() != 1) {
     lex.cur().error("`until` condition value is not a singleton");
   }
+
+  DebugInfo& di_end = insert_debug_info(lex, code);
+  di_end.require_context_id = end_context_id;
+
   return res & ~blk_fl::empty;
 }
 
 blk_fl::val parse_try_catch_stmt(Lexer& lex, CodeBlob& code) {
   code.require_callxargs = true;
   lex.expect(_Try);
+
+  DebugInfo& di = insert_debug_info(lex, code);
+
+  int catch_context_id = allocate_context_id();
+  int end_context_id = allocate_context_id();
+
   Op& try_catch_op = code.emplace_back(lex.cur().loc, Op::_TryCatch);
   code.push_set_cur(try_catch_op.block0);
-  blk_fl::val res0 = parse_block_stmt(lex, code);
+
+  DebugInfo* di_try = nullptr;
+  DebugInfo* di_try_end = nullptr;
+  blk_fl::val res0 = parse_block_stmt(lex, code, false, &di_try, &di_try_end);
+  di_try->try_catch_context_id = catch_context_id;
+  di_try->require_context_id = di.context_id;
+  di_try_end->context_id = end_context_id;
+  di_try_end->is_try_end = true;
+
   code.close_pop_cur(lex.cur().loc);
   lex.expect(_Catch);
   code.push_set_cur(try_catch_op.block1);
@@ -1134,14 +1225,26 @@ blk_fl::val parse_try_catch_stmt(Lexer& lex, CodeBlob& code) {
   expr->define_new_vars(code);
   try_catch_op.left = expr->pre_compile(code);
   func_assert(try_catch_op.left.size() == 2 || try_catch_op.left.size() == 1);
-  blk_fl::val res1 = parse_block_stmt(lex, code);
+
+  DebugInfo* catch_di = nullptr;
+  DebugInfo* catch_di_end = nullptr;
+
+  blk_fl::val res1 = parse_block_stmt(lex, code, false, &catch_di, &catch_di_end);
+
+  catch_di->require_context_id = catch_context_id;
+  catch_di_end->context_id = end_context_id;
+
   sym::close_scope(lex);
   code.close_pop_cur(lex.cur().loc);
   blk_fl::combine_parallel(res0, res1);
+
+  DebugInfo& di_end = insert_debug_info(lex, code);
+  di_end.require_context_id = end_context_id;
+
   return res0;
 }
 
-blk_fl::val parse_if_stmt(Lexer& lex, CodeBlob& code, int first_lex = _If) {
+blk_fl::val parse_if_stmt(Lexer& lex, CodeBlob& code, int first_lex = _If, int final_context_id = -1) {
   SrcLocation loc{lex.cur().loc};
   lex.expect(first_lex);
   auto expr = parse_expr(lex, code);
@@ -1158,31 +1261,81 @@ blk_fl::val parse_if_stmt(Lexer& lex, CodeBlob& code, int first_lex = _If) {
   if (tmp_vars.size() != 1) {
     lex.cur().error("condition value is not a singleton");
   }
+
+  bool orig_if = final_context_id < 0;
+
+  DebugInfo& di = insert_debug_info(lex, code);
+  di.branch_true_context_id = allocate_context_id();
+  di.branch_false_context_id = allocate_context_id();
+  if (orig_if) {
+    final_context_id = di.context_id;
+  }
+
   Op& if_op = code.emplace_back(loc, Op::_If, tmp_vars);
   code.push_set_cur(if_op.block0);
-  blk_fl::val res1 = parse_block_stmt(lex, code);
+
+  DebugInfo* true_di = nullptr;
+  DebugInfo* false_di = nullptr;
+  DebugInfo* true_di_end = nullptr;
+
+  blk_fl::val res1 = parse_block_stmt(lex, code, false, &true_di, &true_di_end);
+
+  true_di->require_context_id = di.branch_true_context_id;
+  true_di_end->context_id = final_context_id;
+
   blk_fl::val res2 = blk_fl::init;
   code.close_pop_cur(lex.cur().loc);
   if (lex.tp() == _Else) {
     lex.expect(_Else);
     code.push_set_cur(if_op.block1);
-    res2 = parse_block_stmt(lex, code);
+
+    DebugInfo* false_di_end = nullptr;
+
+    res2 = parse_block_stmt(lex, code, false, &false_di, &false_di_end);
+    false_di->require_context_id = di.branch_false_context_id;
+    false_di_end->context_id = final_context_id;
+
     code.close_pop_cur(lex.cur().loc);
   } else if (lex.tp() == _Elseif || lex.tp() == _Elseifnot) {
     code.push_set_cur(if_op.block1);
-    res2 = parse_if_stmt(lex, code, lex.tp());
+
+    false_di = &insert_debug_info(lex, code);
+    false_di->require_context_id = di.branch_false_context_id;
+
+    res2 = parse_if_stmt(lex, code, lex.tp(), final_context_id);
     code.close_pop_cur(lex.cur().loc);
   } else {
     if_op.block1 = std::make_unique<Op>(lex.cur().loc, Op::_Nop);
+    di.branch_false_context_id = final_context_id;
   }
   if (first_lex == _Ifnot || first_lex == _Elseifnot) {
     std::swap(if_op.block0, if_op.block1);
+    std::swap(di.branch_true_context_id, di.branch_false_context_id);
+    if (true_di != nullptr) {
+      true_di->require_context_id = di.branch_false_context_id;
+    }
+    if (false_di != nullptr) {
+      false_di->require_context_id = di.branch_true_context_id;
+    }
   }
   blk_fl::combine_parallel(res1, res2);
+
+  if (orig_if) {
+    DebugInfo& di_end = insert_debug_info(lex, code);
+    di_end.require_context_id = final_context_id;
+  }
+
   return res1;
 }
 
 blk_fl::val parse_stmt(Lexer& lex, CodeBlob& code) {
+  DebugInfo& di = insert_debug_info(lex, code);
+  di.want_vars = true;
+  di.first_stmt = !code.had_stmts;
+  if (di.first_stmt) {
+    di.require_context_id = -1;
+  }
+  code.had_stmts = true;
   switch (lex.tp()) {
     case _Return: {
       lex.next();
@@ -1216,9 +1369,9 @@ blk_fl::val parse_stmt(Lexer& lex, CodeBlob& code) {
   }
 }
 
-CodeBlob* parse_func_body(Lexer& lex, FormalArgList arg_list, TypeExpr* ret_type) {
+CodeBlob* parse_func_body(Lexer& lex, FormalArgList arg_list, TypeExpr* ret_type, std::string& name) {
   lex.expect('{');
-  CodeBlob* blob = new CodeBlob{ret_type};
+  CodeBlob* blob = new CodeBlob{ret_type, name};
   if (pragma_allow_post_modification.enabled()) {
     blob->flags |= CodeBlob::_AllowPostModification;
   }
@@ -1522,8 +1675,7 @@ void parse_func_def(Lexer& lex) {
     if (func_sym_code->code) {
       lex.cur().error("redefinition of function `"s + func_name.str + "`");
     }
-    CodeBlob* code = parse_func_body(lex, arg_list, ret_type);
-    code->name = func_name.str;
+    CodeBlob* code = parse_func_body(lex, arg_list, ret_type, func_name.str);
     code->loc = loc;
     // code->print(std::cerr);  // !!!DEBUG!!!
     func_sym_code->code = code;
