@@ -206,12 +206,18 @@ const char *emulate_sbs(void *em, const char* libs, const char* account, const c
       rand_seed_set = transaction_emulator_set_rand_seed(em, decoded_params.rand_seed_hex.unwrap().c_str());
     }
 
+    bool prev_blocks_set = true;
+    if (decoded_params.prev_blocks_info) {
+      prev_blocks_set = transaction_emulator_set_prev_blocks_info(em, decoded_params.prev_blocks_info.unwrap().c_str());
+    }
+
     if (!transaction_emulator_set_libs(em, libs) ||
         !transaction_emulator_set_lt(em, decoded_params.lt) ||
         !transaction_emulator_set_unixtime(em, decoded_params.utime) ||
         !transaction_emulator_set_ignore_chksig(em, decoded_params.ignore_chksig) ||
         !transaction_emulator_set_debug_enabled(em, decoded_params.debug_enabled) ||
-        !rand_seed_set) {
+        !rand_seed_set ||
+        !prev_blocks_set) {
         return strdup(R"({"fail":true,"message":"Can't set params"})");
     }
 
