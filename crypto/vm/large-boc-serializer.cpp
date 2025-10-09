@@ -115,7 +115,7 @@ td::Status LargeBocSerializer::import_cells() {
 
 td::Result<int> LargeBocSerializer::import_cell(Hash root_hash, int root_depth) {
   const int start_ind = cell_count;
-  td::HashMap<Hash, std::pair<int, bool>> current_depth_hashes;
+  td::BTreeMap<Hash, std::pair<int, bool>> current_depth_hashes;
 
   auto existing_it = cells.find(root_hash);
   if (existing_it != cells.end()) {
@@ -131,7 +131,7 @@ td::Result<int> LargeBocSerializer::import_cell(Hash root_hash, int root_depth) 
     }
     
     cell_list.resize(cell_list.size() + current_depth_hashes.size());
-    td::HashMap<Hash, std::pair<int, bool>> next_depth_hashes;
+    td::BTreeMap<Hash, std::pair<int, bool>> next_depth_hashes;
     auto batch_start = current_depth_hashes.begin();
     while (batch_start != current_depth_hashes.end()) {
       std::vector<td::Slice> batch_hashes;
@@ -502,8 +502,8 @@ td::Status LargeBocSerializer::serialize(td::FileFd& fd, int mode) {
       if (dc_info.is_root_cell && (mode & Mode::WithTopHash)) {
         with_hash = true;
       }
-      unsigned char buf[256];
-      int s = dc->serialize(buf, 256, with_hash);
+      unsigned char buf[Cell::max_serialized_bytes];
+      int s = dc->serialize(buf, Cell::max_serialized_bytes, with_hash);
       writer.store_bytes(buf, s);
       DCHECK(dc->size_refs() == dc_info.get_ref_num());
       unsigned ref_num = dc_info.get_ref_num();
